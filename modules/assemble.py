@@ -82,13 +82,31 @@ def assemble(
 
     logger.info(f"Video duration: {vid_dur:.3f}s | Audio duration: {aud_dur:.3f}s")
 
-    # Build audio filter chain
-    audio_filters = []
+    # Decide output duration strategy
+    # - If audio is close to video length (ratio 0.65-1.5): use atempo to sync
+    # - If audio is much shorter than video (ratio < 0.65): trim video to audio
+    #   length — original speaker only spoke briefly; silence tail sounds bad
+    # - If audio is longer than video (ratio > 1.5): speed up audio to fit
 
-    if vid_dur and aud_dur and abs(aud_dur - vid_dur) > 0.1:
+    audio_filters = []
+    out_duration = vid_dur  # default: output = full clip length
+
+    if vid_dur and aud_dur:
         ratio = aud_dur / vid_dur
-        logger.info(f"Applying atempo={ratio:.4f} to sync audio to video")
-        audio_filters.append(_build_atempo_chain(ratio))
+        logger.info(f"Audio/video ratio: {ratio:.3f}")
+
+        if ratio < 0.65:
+            # Dubbed speech much shorter than clip — trim video to audio length
+            logger.info(
+                f"Dubbed audio ({aud_dur:.1f}s) << clip ({vid_dur:.1f}s); "
+                "trimming output to audio length to avoid silent tail"
+            )
+            out_duration = aud_dur
+            # No atempo needed — video will be trimmed to match audio
+        elif abs(ratio - 1.0) > 0.05:
+            # Close enough: apply atempo to fit audio to video length
+            logger.info(f"Applying atempo={ratio:.4f} to sync audio to video")
+            audio_filters.append(_build_atempo_chain(ratio))
 
     if normalize_audio:
         audio_filters.append("loudnorm=I=-14:TP=-1.5:LRA=11")
@@ -110,9 +128,10 @@ def assemble(
         "-movflags", "+faststart",
     ]
 
-    # Hard-trim to video duration to guarantee no audio tail
-    if vid_dur:
-        cmd += ["-t", str(vid_dur)]
+    # Hard-trim to out_duration: either full clip length or audio length
+    # (out_duration == aud_dur when dubbed speech is much shorter than clip)
+    if out_duration:
+        cmd += ["-t", str(out_duration)]
 
     cmd += ["-y", output_path]
 
