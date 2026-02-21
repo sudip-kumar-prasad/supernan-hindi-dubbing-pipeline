@@ -89,9 +89,21 @@ def assemble(
         ratio = aud_dur / vid_dur
         logger.info(f"Audio/video ratio: {ratio:.3f}")
 
-        if abs(ratio - 1.0) > 0.05:
-            # Apply atempo to stretch or compress audio to exactly match video length
-            logger.info(f"Applying atempo={ratio:.4f} to sync audio to video length")
+        if ratio < 0.95:
+            if ratio < 0.65:
+                # Speech much shorter than clip: pad audio with silence to fill clip,
+                # then apply very gentle stretch if needed.
+                logger.info(
+                    f"Dubbed audio ({aud_dur:.1f}s) << clip ({vid_dur:.1f}s); "
+                    "padding audio with silence to fill clip duration"
+                )
+                audio_filters.append("apad")
+            else:
+                # Close: apply atempo to match
+                logger.info(f"Applying atempo={ratio:.4f} to sync audio to video")
+                audio_filters.append(_build_atempo_chain(ratio))
+        elif ratio > 1.05:
+            logger.info(f"Applying atempo={ratio:.4f} to compress audio to video")
             audio_filters.append(_build_atempo_chain(ratio))
 
     if normalize_audio and (not aud_dur or not vid_dur or (aud_dur / vid_dur) >= 0.5):
