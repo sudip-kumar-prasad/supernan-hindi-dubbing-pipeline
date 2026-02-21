@@ -4,21 +4,23 @@ modules/tts.py
 Stage 4 – Hindi Voice Cloning & Synthesis (Coqui XTTS v2)
 
 Key design decisions:
-  • Voice is cloned from the original English audio clip so the output voice
-    matches the speaker's timbre, not a generic Hindi TTS voice.
-  • Each translated segment is synthesised independently, then each chunk is
-    time-stretched (pitch-preserving via pyrubberband) to fill exactly the
-    original segment duration. This keeps lips in sync without gaps/overlaps.
-  • For long videos the same strategy applies: process one segment at a time,
-    concat with ffmpeg at the end.
+  • XTTS v2 has a 150-character limit per call — long Hindi text must be split
+    into sentences BEFORE synthesis or the model truncates to first sentence only.
+  • Each sentence is synthesised independently and WAVs are concatenated.
+  • The concatenated audio is then fitted to the target segment duration:
+      - If ratio is in [0.85, 1.5]: use pyrubberband atempo stretch
+      - If audio is much shorter (ratio < 0.85): pad with silence — better than
+        a 2× slow-motion voice
+      - Hard trim/pad to exact sample count after any stretching
 
 Dependencies:
-    pip install TTS pyrubberband
+    pip install TTS pyrubberband soundfile pydub
     apt-get install -y rubberband-cli   (Colab)
 """
 
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -27,54 +29,130 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000  # XTTS v2 native sample rate
+XTTS_CHAR_LIMIT = 140  # stay safely below the 150-char tokenizer limit
+
+
+# ── Sentence splitting ────────────────────────────────────────────────────────
+
+def _split_into_sentences(text: str, max_chars: int = XTTS_CHAR_LIMIT) -> list[str]:
+    """
+    Split *text* into chunks each ≤ *max_chars* characters.
+    Splits on sentence-ending punctuation first, then on commas/clauses,
+    then hard-splits at max_chars if no good split point is found.
+    """
+    # Normalize whitespace
+    text = " ".join(text.split())
+
+    if len(text) <= max_chars:
+        return [text]
+
+    # Try splitting on Hindi/Latin sentence boundaries: ।  .  !  ?
+    # Split on commas/clauses for finer granularity if needed
+    raw_parts = re.split(r'(?<=[।.!?])\s+|(?<=[,،])\s+', text)
+
+    chunks: list[str] = []
+    current = ""
+    for part in raw_parts:
+        candidate = (current + " " + part).strip() if current else part
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            # If a single part is still too long, hard-split it
+            if len(part) > max_chars:
+                words = part.split()
+                buf = ""
+                for w in words:
+                    trial = (buf + " " + w).strip() if buf else w
+                    if len(trial) <= max_chars:
+                        buf = trial
+                    else:
+                        if buf:
+                            chunks.append(buf)
+                        buf = w
+                current = buf
+            else:
+                current = part
+
+    if current:
+        chunks.append(current)
+
+    return [c for c in chunks if c.strip()]
 
 
 # ── Duration matching ─────────────────────────────────────────────────────────
-
-def _stretch_audio(
-    audio: np.ndarray,
-    sr: int,
-    target_duration: float,
-    tolerance: float = 0.05,
-) -> np.ndarray:
-    """
-    Time-stretch *audio* to *target_duration* seconds (pitch-preserving).
-    Clamps ratio to [0.5, 2.0] to prevent extreme distortion.
-    """
-    current_duration = len(audio) / sr
-    ratio = current_duration / target_duration  # >1 → speed up, <1 → slow down
-
-    # Clamp: never stretch more than 2× slower or 2× faster
-    ratio = max(0.5, min(ratio, 2.0))
-
-    if abs(ratio - 1.0) < tolerance:
-        # Already close — just trim/pad to exact length
-        return _hard_trim_pad(audio, sr, target_duration)
-
-    try:
-        import pyrubberband as pyrb
-        stretched = pyrb.time_stretch(audio, sr, rate=ratio)
-    except Exception as e:
-        logger.warning(f"pyrubberband unavailable ({e}); using naive resampling")
-        target_len = int(target_duration * sr)
-        stretched = np.interp(
-            np.linspace(0, len(audio) - 1, target_len),
-            np.arange(len(audio)),
-            audio,
-        ).astype(audio.dtype)
-
-    # Hard trim/pad to guarantee exact duration
-    return _hard_trim_pad(stretched, sr, target_duration)
-
 
 def _hard_trim_pad(audio: np.ndarray, sr: int, target_duration: float) -> np.ndarray:
     """Trim or zero-pad audio to exactly target_duration seconds."""
     target_samples = int(round(target_duration * sr))
     if len(audio) >= target_samples:
         return audio[:target_samples]
-    # Pad with silence
     pad = np.zeros(target_samples - len(audio), dtype=audio.dtype)
     return np.concatenate([audio, pad])
+
+
+def _fit_audio(
+    audio: np.ndarray,
+    sr: int,
+    target_duration: float,
+) -> np.ndarray:
+    """
+    Fit *audio* to *target_duration* seconds.
+
+    Strategy:
+      • ratio = audio_duration / target_duration
+      • 0.85 ≤ ratio ≤ 1.5  → pyrubberband stretch (natural speed change)
+      • ratio > 1.5           → must speed up; rubberband or naive resample
+      • ratio < 0.85          → speech is much shorter than target; just pad
+                                 with silence (sounds far better than 2× slow)
+    Final hard trim/pad to exact sample count.
+    """
+    current_duration = len(audio) / sr
+    if target_duration <= 0:
+        return audio
+
+    ratio = current_duration / target_duration
+
+    logger.debug(f"_fit_audio: audio={current_duration:.2f}s target={target_duration:.2f}s ratio={ratio:.3f}")
+
+    if 0.85 <= ratio <= 1.5:
+        # Normal speed adjustment — sounds good
+        try:
+            import pyrubberband as pyrb
+            audio = pyrb.time_stretch(audio, sr, rate=ratio)
+        except Exception as e:
+            logger.warning(f"pyrubberband failed ({e}); using naive resample")
+            target_len = int(target_duration * sr)
+            audio = np.interp(
+                np.linspace(0, len(audio) - 1, target_len),
+                np.arange(len(audio)),
+                audio,
+            ).astype(audio.dtype)
+    elif ratio > 1.5:
+        # Speech is much longer than slot; must speed up
+        # Clamp to max 2.0 to avoid chipmunk effect
+        clamped = min(ratio, 2.0)
+        try:
+            import pyrubberband as pyrb
+            audio = pyrb.time_stretch(audio, sr, rate=clamped)
+        except Exception as e:
+            logger.warning(f"pyrubberband failed ({e}); using naive resample")
+            target_len = int(target_duration * sr)
+            audio = np.interp(
+                np.linspace(0, len(audio) - 1, target_len),
+                np.arange(len(audio)),
+                audio,
+            ).astype(audio.dtype)
+    else:
+        # ratio < 0.85 → audio is less than 85% of target duration
+        # Pad with silence — far better than slowing speech to 0.5× speed
+        logger.info(
+            f"Audio ({current_duration:.1f}s) much shorter than target ({target_duration:.1f}s); "
+            "padding with silence instead of slow-stretching"
+        )
+
+    return _hard_trim_pad(audio, sr, target_duration)
 
 
 # ── XTTS synthesis ────────────────────────────────────────────────────────────
@@ -95,6 +173,58 @@ def _has_gpu() -> bool:
         return False
 
 
+def _synth_sentences(
+    tts,
+    sentences: list[str],
+    speaker_wav: str,
+    tmp_dir: str,
+    prefix: str,
+) -> np.ndarray:
+    """
+    Synthesise each sentence independently (respecting XTTS char limit),
+    then concatenate the audio arrays.
+    """
+    import soundfile as sf
+
+    parts: list[np.ndarray] = []
+
+    for j, sentence in enumerate(sentences):
+        if not sentence.strip():
+            continue
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=tmp_dir) as f:
+            sent_path = f.name
+
+        logger.info(f"  sentence {j+1}/{len(sentences)}: '{sentence[:80]}'")
+
+        try:
+            tts.tts_to_file(
+                text=sentence,
+                speaker_wav=speaker_wav,
+                language="hi",
+                file_path=sent_path,
+                speed=1.15,   # slight speed-up to help fit long translations
+            )
+        except TypeError:
+            # older TTS API without speed param
+            tts.tts_to_file(
+                text=sentence,
+                speaker_wav=speaker_wav,
+                language="hi",
+                file_path=sent_path,
+            )
+
+        audio, sr = sf.read(sent_path)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        parts.append(audio.astype(np.float32))
+        os.unlink(sent_path)
+
+    if not parts:
+        return np.zeros(SAMPLE_RATE, dtype=np.float32)  # 1s silence fallback
+
+    return np.concatenate(parts)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def synthesise(
@@ -103,8 +233,14 @@ def synthesise(
     tmp_dir: str = "tmp",
 ) -> str:
     """
-    Synthesise Hindi speech for each segment, time-stretch to match original
-    duration, and concatenate into a single WAV.
+    Synthesise Hindi speech for each segment and concatenate into a single WAV.
+
+    For each segment:
+      1. Split Hindi text into ≤140-char sentences (XTTS limit).
+      2. Synthesise each sentence separately.
+      3. Concatenate sentence WAVs.
+      4. Fit to target duration (stretch if close, pad if too short).
+      5. Concatenate all segment WAVs into final dubbed track.
 
     Parameters
     ----------
@@ -126,55 +262,34 @@ def synthesise(
 
     for i, seg in enumerate(segments):
         hindi_text = seg.get("hindi", "").strip()
+        target_duration = seg["end"] - seg["start"]
+
         if not hindi_text:
             logger.warning(f"Segment {i} has empty Hindi text; inserting silence")
-            target_dur = seg["end"] - seg["start"]
-            silence = np.zeros(int(target_dur * SAMPLE_RATE), dtype=np.float32)
+            silence = np.zeros(int(target_duration * SAMPLE_RATE), dtype=np.float32)
             chunk_path = os.path.join(tmp_dir, f"seg_{i:04d}.wav")
             sf.write(chunk_path, silence, SAMPLE_RATE)
             chunk_paths.append(chunk_path)
             continue
 
-        target_duration = seg["end"] - seg["start"]
-
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_f:
-            raw_path = tmp_f.name
-
+        sentences = _split_into_sentences(hindi_text)
         logger.info(
-            f"[{i+1}/{len(segments)}] Synthesising: '{hindi_text[:60]}…'"
+            f"[{i+1}/{len(segments)}] Synthesising {len(sentences)} sentence(s) "
+            f"(target: {target_duration:.1f}s): '{hindi_text[:60]}…'"
             if len(hindi_text) > 60 else
-            f"[{i+1}/{len(segments)}] Synthesising: '{hindi_text}'"
+            f"[{i+1}/{len(segments)}] Synthesising '{hindi_text}'"
         )
 
-        # speed=1.2 – Hindi text is typically 20-30% longer than source;
-        # speaking slightly faster keeps the output inside the segment window.
-        try:
-            tts.tts_to_file(
-                text=hindi_text,
-                speaker_wav=speaker_wav,
-                language="hi",
-                file_path=raw_path,
-                speed=1.2,
-            )
-        except TypeError:
-            # Older TTS API without speed param
-            tts.tts_to_file(
-                text=hindi_text,
-                speaker_wav=speaker_wav,
-                language="hi",
-                file_path=raw_path,
-            )
+        # Synthesise all sentences and concatenate
+        raw_audio = _synth_sentences(tts, sentences, speaker_wav, tmp_dir, f"seg{i}")
+        raw_duration = len(raw_audio) / SAMPLE_RATE
+        logger.info(f"  raw synthesis: {raw_duration:.2f}s → fitting to {target_duration:.2f}s")
 
-        # Load, stretch, save
-        audio, sr = sf.read(raw_path)
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)  # stereo → mono
-        audio = audio.astype(np.float32)
-
-        stretched = _stretch_audio(audio, sr, target_duration)
+        # Fit to target duration
+        fitted = _fit_audio(raw_audio, SAMPLE_RATE, target_duration)
 
         chunk_path = os.path.join(tmp_dir, f"seg_{i:04d}.wav")
-        sf.write(chunk_path, stretched, sr)
+        sf.write(chunk_path, fitted, SAMPLE_RATE)
         chunk_paths.append(chunk_path)
 
     # ── Concatenate all segment WAVs ─────────────────────────────────────────
