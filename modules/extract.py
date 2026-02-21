@@ -37,6 +37,10 @@ def extract(
     """
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
 
+    clip_path = os.path.join(tmp_dir, "clip.mp4")
+    audio_path = os.path.join(tmp_dir, "clip_audio.wav")
+    silent_path = os.path.join(tmp_dir, "clip_silent.mp4")
+
     # ── 1. Trim to clip (or keep full video) ─────────────────────────────────
     if start is not None and end is not None:
         duration = end - start
