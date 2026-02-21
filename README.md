@@ -1,6 +1,9 @@
 # 🎬 Supernan Hindi Dubbing Pipeline
 
-A modular, **₹0-cost** Python pipeline that takes an English training video and produces a Hindi-dubbed, lip-synced, face-restored clip — designed to run on **Google Colab Free Tier (T4 GPU)** and scale to 500-hour production batches.
+A modular, **₹0-cost** Python pipeline that takes an Indian-language training video and produces a Hindi-dubbed, lip-synced, face-restored clip — designed to run on **Google Colab Free Tier (T4 GPU)** and scale to 500-hour production batches.
+
+> **Repo**: [sudip-kumar-prasad/supernan-hindi-dubbing-pipeline](https://github.com/sudip-kumar-prasad/supernan-hindi-dubbing-pipeline)
+> **Source language**: Kannada (auto-detected by Whisper). Optimal clip: **0:45 – 1:00**.
 
 ---
 
@@ -25,10 +28,10 @@ Input Video
 [Stage 1] extract.py      ffmpeg clip + audio/video separation
     │
     ▼
-[Stage 2] transcribe.py   Whisper ASR → English segments (JSON)
+[Stage 2] transcribe.py   Whisper ASR → Kannada/Indic segments (auto-detect, JSON)
     │
     ▼
-[Stage 3] translate.py    IndicTrans2 (+ deep-translator fallback) → Hindi segments
+[Stage 3] translate.py    IndicTrans2-indic-indic-1B (+ deep-translator fallback) → Hindi segments
     │
     ▼
 [Stage 4] tts.py          Coqui XTTS v2 voice cloning + pyrubberband duration matching
@@ -60,8 +63,8 @@ Intermediate files and per-stage checkpoints are saved to `tmp/`. If a run is in
 ### Local (CPU – good for testing stages 1–4)
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/AI_Automation.git
-cd AI_Automation
+git clone https://github.com/sudip-kumar-prasad/supernan-hindi-dubbing-pipeline.git
+cd supernan-hindi-dubbing-pipeline
 pip install -r requirements.txt
 apt-get install -y rubberband-cli   # macOS: brew install rubberband
 ```
@@ -75,17 +78,17 @@ Set **Runtime → T4 GPU** before running.
 
 ## Usage
 
-### Basic (process 0:15 – 0:30 segment)
+### Basic (process 0:45 – 1:00 segment — confirmed Kannada speech)
 
 ```bash
-python dub_video.py --input input.mp4 --output output.mp4 --start 15 --end 30
+python dub_video.py --input input.mp4 --output output.mp4 --start 45 --end 60
 ```
 
 ### CPU-only / local testing (skips lip-sync & face restoration)
 
 ```bash
 python dub_video.py --input input.mp4 --output output_test.mp4 \
-    --start 15 --end 30 --skip-lipsync --skip-enhance
+    --start 45 --end 60 --skip-lipsync --skip-enhance
 ```
 
 ### Long video with silence-based batching
@@ -100,10 +103,11 @@ python dub_video.py --input input.mp4 --output output.mp4 \
 ```
 --input      / -i    Source video (required)
 --output     / -o    Output path (default: output.mp4)
---start      / -s    Clip start in seconds (default: 15)
---end        / -e    Clip end in seconds (default: 30)
+--start      / -s    Clip start in seconds (default: 45)
+--end        / -e    Clip end in seconds (default: 60)
 --tmp-dir           Intermediate file directory (default: tmp/)
 --model             Whisper model: tiny|base|small|medium|large-v3 (default: base)
+--source-lang       Source language code, e.g. kn, en, mr (default: auto-detect)
 --skip-lipsync      Skip lip-sync (CPU testing)
 --skip-enhance      Skip face restoration
 --no-indictrans     Use deep-translator instead of IndicTrans2
@@ -122,7 +126,7 @@ python dub_video.py --input input.mp4 --output output.mp4 \
 | `pydub` | ≥0.25.1 | Audio concatenation, silence detection |
 | `openai-whisper` | ≥20231117 | Speech-to-text ASR |
 | `deep-translator` | ≥1.11.4 | Free Google Translate fallback |
-| `IndicTrans2` | git | Context-aware En→Hi translation |
+| `IndicTrans2` | git | Context-aware Indic→Hindi translation (indic-indic-1B) |
 | `TTS` (Coqui) | ≥0.22.0 | XTTS v2 voice cloning |
 | `pyrubberband` | ≥0.3.0 | Pitch-preserving time-stretch |
 | `gfpgan` | ≥1.3.8 | Face restoration |
@@ -220,7 +224,7 @@ Video Files (S3)    │    Task Queue (Celery + Redis)   │
 ## Project Structure
 
 ```
-AI_Automation/
+supernan-hindi-dubbing-pipeline/
 ├── dub_video.py           # Orchestrator CLI (7 stages)
 ├── modules/
 │   ├── __init__.py
