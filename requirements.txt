@@ -1,0 +1,35 @@
+# ── Core utilities ───────────────────────────────────────────────────────────
+ffmpeg-python>=0.2.0
+pydub>=0.25.1
+numpy>=1.24.0
+tqdm>=4.65.0
+colorlog>=6.7.0
+
+# ── ASR ──────────────────────────────────────────────────────────────────────
+openai-whisper>=20231117   # Whisper ASR (CPU/GPU)
+
+# ── Translation ───────────────────────────────────────────────────────────────
+deep-translator>=1.11.4    # Free Google Translate wrapper (fallback)
+# IndicTrans2 installed separately in Colab (heavy HF model)
+# pip install git+https://github.com/AI4Bharat/IndicTrans2.git
+
+# ── TTS / Voice Cloning ───────────────────────────────────────────────────────
+TTS>=0.22.0                # Coqui XTTS v2
+pyrubberband>=0.3.0        # Pitch-preserving time-stretch
+
+# ── Face Restoration ──────────────────────────────────────────────────────────
+facexlib>=0.3.0
+basicsr>=1.4.2
+gfpgan>=1.3.8
+
+# ── Lip Sync (Wav2Lip fallback, VideoReTalking installed via git in Colab) ────
+# Wav2Lip has no pip package; downloaded & installed via Colab cell
+
+# ── HuggingFace Hub (model download helper) ───────────────────────────────────
+huggingface_hub>=0.19.4
+transformers>=4.36.0
+sentencepiece>=0.1.99
+sacremoses>=0.0.53
+
+# ── Dev / Testing ─────────────────────────────────────────────────────────────
+pytest>=7.4.0
