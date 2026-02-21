@@ -37,6 +37,24 @@ def _get_duration(path: str) -> float | None:
     return None
 
 
+def _has_audio(path: str) -> bool:
+    """Check if media file contains an audio stream."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams", "-select_streams", "a", path,
+            ],
+            capture_output=True, text=True, check=True,
+        )
+        streams = json.loads(result.stdout).get("streams", [])
+        return len(streams) > 0
+    except Exception as e:
+        logger.warning(f"ffprobe audio check failed for {path}: {e}")
+        return False
+
+
 def _build_atempo_chain(ratio: float) -> str:
     """
     Build an ffmpeg atempo filter chain for *ratio*.
@@ -113,30 +131,53 @@ def assemble(
 
     af_str = ",".join(audio_filters) if audio_filters else "anull"
 
-    # [0:a:0] is original background audio (lowered to 15% volume)
-    # [1:a:0] is the new dubbed audio (processed with atempo/apad)
-    # We mix them together using amix, and apply the final normalization/volume bump.
-    filter_complex = (
-        f"[0:a:0]volume=0.15[bg]; "
-        f"[1:a:0]{af_str}[dub]; "
-        f"[bg][dub]amix=inputs=2:duration=first:dropout_transition=2,"
-        f"volume=2.0,{final_mix_filter}[aout]"  # amix halves volume, so we double it before loudnorm
-    )
-
+    has_bg_audio = _has_audio(video_path)
+    
     cmd = [
         "ffmpeg",
         "-i", video_path,
         "-i", audio_path,
-        "-filter_complex", filter_complex,
-        "-map", "0:v:0",   # video from first input
-        "-map", "[aout]",  # mixed audio from filter_complex
+    ]
+
+    if has_bg_audio:
+        # Mix original background audio (lowered to 15% volume) with the new dubbed audio
+        filter_complex = (
+            f"[0:a:0]volume=0.15[bg]; "
+            f"[1:a:0]{af_str}[dub]; "
+            f"[bg][dub]amix=inputs=2:duration=first:dropout_transition=2,"
+            f"volume=2.0,{final_mix_filter}[aout]"  # amix halves volume, so we double it before loudnorm
+        )
+        cmd.extend([
+            "-filter_complex", filter_complex,
+            "-map", "0:v:0",   # video from first input
+            "-map", "[aout]",  # mixed audio from filter_complex
+        ])
+    else:
+        # Original video has no audio track; just apply filters to the dubbed audio directly
+        logger.info(f"Original video {video_path} has no audio track; skipping background mix.")
+        
+        f_chain = []
+        if af_str != "anull":
+            f_chain.append(af_str)
+        if final_mix_filter != "anull":
+            f_chain.append(final_mix_filter)
+        
+        final_af = ",".join(f_chain) if f_chain else "anull"
+        
+        cmd.extend([
+            "-map", "0:v:0",   # video from first input
+            "-map", "1:a:0",   # audio from second input
+            "-af", final_af,
+        ])
+
+    cmd.extend([
         "-c:v", "libx264",
         "-crf", "18",
         "-preset", "fast",   # faster encode, same quality
         "-c:a", "aac",
         "-b:a", "192k",
         "-movflags", "+faststart",
-    ]
+    ])
 
     # Hard-trim to out_duration: either full clip length or audio length
     # (out_duration == aud_dur when dubbed speech is much shorter than clip)
