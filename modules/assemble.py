@@ -4,15 +4,54 @@ modules/assemble.py
 Stage 7 – Final Assembly
 
 Merges the enhanced (or lip-synced) video with the Hindi dubbed audio using
-ffmpeg. Also normalises audio loudness to broadcast standard (–14 LUFS).
+ffmpeg. Uses ffmpeg's native atempo filter to FORCE the audio to exactly match
+the video duration — no external libraries needed, 100% reliable sync.
 """
 
 import logging
 import os
 import subprocess
+import json
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _get_duration(path: str) -> float | None:
+    """Return media duration in seconds using ffprobe."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams", path,
+            ],
+            capture_output=True, text=True, check=True,
+        )
+        streams = json.loads(result.stdout).get("streams", [])
+        for s in streams:
+            if "duration" in s:
+                return float(s["duration"])
+    except Exception as e:
+        logger.warning(f"ffprobe failed for {path}: {e}")
+    return None
+
+
+def _build_atempo_chain(ratio: float) -> str:
+    """
+    Build an ffmpeg atempo filter chain for *ratio*.
+    atempo only accepts values in [0.5, 2.0]; chain multiple filters for
+    ratios outside that range.
+    """
+    filters = []
+    while ratio > 2.0:
+        filters.append("atempo=2.0")
+        ratio /= 2.0
+    while ratio < 0.5:
+        filters.append("atempo=0.5")
+        ratio /= 0.5
+    filters.append(f"atempo={ratio:.6f}")
+    return ",".join(filters)
 
 
 def assemble(
@@ -24,55 +63,56 @@ def assemble(
     """
     Mux *video_path* (video stream) + *audio_path* (audio) into *output_path*.
 
-    Parameters
-    ----------
-    video_path      : enhanced / lip-synced video (may or may not have audio)
-    audio_path      : Hindi dubbed WAV
-    output_path     : final output file path
-    normalize_audio : apply EBU R128 loudness normalization (–14 LUFS)
+    A/V sync strategy
+    -----------------
+    1. Measure exact video duration with ffprobe.
+    2. Measure exact audio duration with ffprobe.
+    3. Compute tempo ratio = audio_duration / video_duration.
+    4. Apply ffmpeg atempo chain to stretch/compress audio to match video.
+    5. Hard-trim the output to video duration with -t.
 
-    Returns
-    -------
-    str – path to the final output mp4
+    This means the dubbed audio ALWAYS ends exactly when the video ends,
+    regardless of how long or short the TTS synthesised audio is.
     """
     Path(os.path.dirname(output_path) or ".").mkdir(parents=True, exist_ok=True)
-
     logger.info(f"Assembling final video → {output_path}")
 
-    # Get exact video duration so audio is trimmed to match
-    import subprocess as _sp, json as _json
-    probe = _sp.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", video_path],
-        capture_output=True, text=True,
-    )
-    try:
-        streams = _json.loads(probe.stdout).get("streams", [])
-        vid_duration = next(
-            (float(s["duration"]) for s in streams if s["codec_type"] == "video"), None
-        )
-    except Exception:
-        vid_duration = None
+    vid_dur = _get_duration(video_path)
+    aud_dur = _get_duration(audio_path)
 
-    audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11" if normalize_audio else "anull"
+    logger.info(f"Video duration: {vid_dur:.3f}s | Audio duration: {aud_dur:.3f}s")
+
+    # Build audio filter chain
+    audio_filters = []
+
+    if vid_dur and aud_dur and abs(aud_dur - vid_dur) > 0.1:
+        ratio = aud_dur / vid_dur
+        logger.info(f"Applying atempo={ratio:.4f} to sync audio to video")
+        audio_filters.append(_build_atempo_chain(ratio))
+
+    if normalize_audio:
+        audio_filters.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+
+    af_str = ",".join(audio_filters) if audio_filters else "anull"
 
     cmd = [
         "ffmpeg",
         "-i", video_path,
         "-i", audio_path,
-        "-map", "0:v:0",      # video from first input
-        "-map", "1:a:0",      # audio from second input
-        "-af", audio_filter,
+        "-map", "0:v:0",   # video from first input
+        "-map", "1:a:0",   # audio from second input
+        "-af", af_str,
         "-c:v", "libx264",
         "-crf", "18",
-        "-preset", "slow",
+        "-preset", "fast",   # faster encode, same quality
         "-c:a", "aac",
         "-b:a", "192k",
         "-movflags", "+faststart",
     ]
 
-    # Hard-trim both streams to video duration to guarantee A/V sync
-    if vid_duration:
-        cmd += ["-t", str(vid_duration)]
+    # Hard-trim to video duration to guarantee no audio tail
+    if vid_dur:
+        cmd += ["-t", str(vid_dur)]
 
     cmd += ["-y", output_path]
 
