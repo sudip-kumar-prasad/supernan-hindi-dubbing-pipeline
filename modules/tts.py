@@ -137,7 +137,7 @@ def _synth_sentences(
                 speaker_wav=speaker_wav,
                 language="hi",
                 file_path=sent_path,
-                speed=1.15,   # slight speed-up to help fit long translations
+                # Removed speed=1.15 to prevent rushed slurred pronunciation
             )
         except TypeError:
             # older TTS API without speed param

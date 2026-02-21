@@ -126,8 +126,8 @@ def assemble(
 
     final_mix_filter = "anull"
     if normalize_audio and (not aud_dur or not vid_dur or (aud_dur / vid_dur) >= 0.5):
-        # Apply loudnorm to the final mixed audio
-        final_mix_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
+        # Apply loudnorm to the final mixed audio (target -10 LUFS for very loud clear vocals)
+        final_mix_filter = "loudnorm=I=-10:TP=-1.0:LRA=11"
 
     af_str = ",".join(audio_filters) if audio_filters else "anull"
 
