@@ -98,7 +98,7 @@ def assemble(
                     f"Dubbed audio ({aud_dur:.1f}s) << clip ({vid_dur:.1f}s); "
                     "padding audio with silence to fill clip duration"
                 )
-                audio_filters.append(f"apad=whole_dur_s={vid_dur:.3f}")
+                audio_filters.append("apad")
             else:
                 # Close: apply atempo to match
                 logger.info(f"Applying atempo={ratio:.4f} to sync audio to video")
