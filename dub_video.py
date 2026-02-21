@@ -104,6 +104,7 @@ def _load_checkpoint(tmp_dir: str, stage: str) -> dict | None:
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
+def run(
     input_path: str,
     output_path: str = "output.mp4",
     start: float | None = None,
