@@ -82,33 +82,34 @@ def assemble(
 
     logger.info(f"Video duration: {vid_dur:.3f}s | Audio duration: {aud_dur:.3f}s")
 
-    # Decide output duration strategy
-    # - If audio is close to video length (ratio 0.65-1.5): use atempo to sync
-    # - If audio is much shorter than video (ratio < 0.65): trim video to audio
-    #   length — original speaker only spoke briefly; silence tail sounds bad
-    # - If audio is longer than video (ratio > 1.5): speed up audio to fit
-
     audio_filters = []
-    out_duration = vid_dur  # default: output = full clip length
+    out_duration = vid_dur  # always output the full clip length
 
     if vid_dur and aud_dur:
         ratio = aud_dur / vid_dur
         logger.info(f"Audio/video ratio: {ratio:.3f}")
 
-        if ratio < 0.65:
-            # Dubbed speech much shorter than clip — trim video to audio length
-            logger.info(
-                f"Dubbed audio ({aud_dur:.1f}s) << clip ({vid_dur:.1f}s); "
-                "trimming output to audio length to avoid silent tail"
-            )
-            out_duration = aud_dur
-            # No atempo needed — video will be trimmed to match audio
-        elif abs(ratio - 1.0) > 0.05:
-            # Close enough: apply atempo to fit audio to video length
-            logger.info(f"Applying atempo={ratio:.4f} to sync audio to video")
+        if ratio < 0.95:
+            if ratio < 0.65:
+                # Speech much shorter than clip: pad audio with silence to fill clip,
+                # then apply very gentle stretch if needed.
+                # apad=whole_dur_s fills output to vid_dur seconds
+                logger.info(
+                    f"Dubbed audio ({aud_dur:.1f}s) << clip ({vid_dur:.1f}s); "
+                    "padding audio with silence to fill clip duration"
+                )
+                audio_filters.append(f"apad=whole_dur_s={vid_dur:.3f}")
+            else:
+                # Close: apply atempo to match
+                logger.info(f"Applying atempo={ratio:.4f} to sync audio to video")
+                audio_filters.append(_build_atempo_chain(ratio))
+        elif ratio > 1.05:
+            logger.info(f"Applying atempo={ratio:.4f} to compress audio to video")
             audio_filters.append(_build_atempo_chain(ratio))
 
-    if normalize_audio:
+    if normalize_audio and (not aud_dur or not vid_dur or (aud_dur / vid_dur) >= 0.5):
+        # Skip loudnorm when audio is very short relative to clip
+        # (mostly silence → loudnorm distorts)
         audio_filters.append("loudnorm=I=-14:TP=-1.5:LRA=11")
 
     af_str = ",".join(audio_filters) if audio_filters else "anull"
