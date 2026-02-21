@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 def extract(
     input_path: str,
-    start: float = 15.0,
-    end: float = 30.0,
+    start: float | None = None,
+    end: float | None = None,
     tmp_dir: str = "tmp",
 ) -> dict[str, str]:
     """
@@ -37,20 +37,26 @@ def extract(
     """
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
 
-    duration = end - start
-    clip_path = os.path.join(tmp_dir, "clip.mp4")
-    audio_path = os.path.join(tmp_dir, "clip_audio.wav")
-    silent_path = os.path.join(tmp_dir, "clip_silent.mp4")
-
-    # ── 1. Trim to clip ──────────────────────────────────────────────────────
-    logger.info(f"Trimming {input_path} [{start}s – {end}s] → {clip_path}")
-    (
-        ffmpeg
-        .input(input_path, ss=start, t=duration)
-        .output(clip_path, c="copy", avoid_negative_ts="make_zero")
-        .overwrite_output()
-        .run(quiet=True)
-    )
+    # ── 1. Trim to clip (or keep full video) ─────────────────────────────────
+    if start is not None and end is not None:
+        duration = end - start
+        logger.info(f"Trimming {input_path} [{start}s – {end}s] → {clip_path}")
+        (
+            ffmpeg
+            .input(input_path, ss=start, t=duration)
+            .output(clip_path, c="copy", avoid_negative_ts="make_zero")
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    else:
+        logger.info(f"Processing full video {input_path} → {clip_path}")
+        (
+            ffmpeg
+            .input(input_path)
+            .output(clip_path, c="copy")
+            .overwrite_output()
+            .run(quiet=True)
+        )
 
     # ── 2. Extract mono 16-kHz audio for Whisper ─────────────────────────────
     logger.info(f"Extracting audio → {audio_path}")

@@ -104,11 +104,10 @@ def _load_checkpoint(tmp_dir: str, stage: str) -> dict | None:
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
-def run(
     input_path: str,
     output_path: str = "output.mp4",
-    start: float = 45.0,
-    end: float = 60.0,
+    start: float | None = None,
+    end: float | None = None,
     tmp_dir: str = "tmp",
     model_size: str = "base",
     source_lang: str | None = None,
@@ -254,8 +253,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--input", "-i", required=True, help="Source video file (e.g. input.mp4)")
     p.add_argument("--output", "-o", default="output.mp4", help="Output file (default: output.mp4)")
-    p.add_argument("--start", "-s", type=float, default=45.0, help="Clip start (seconds). Default: 45 (confirmed speech window for source video)")
-    p.add_argument("--end", "-e", type=float, default=60.0, help="Clip end (seconds). Default: 60")
+    p.add_argument("--start", "-s", type=float, default=None, help="Clip start (seconds). Default: Full video")
+    p.add_argument("--end", "-e", type=float, default=None, help="Clip end (seconds). Default: Full video")
     p.add_argument("--tmp-dir", default="tmp", help="Directory for intermediate files (default: tmp/)")
     p.add_argument(
         "--model",

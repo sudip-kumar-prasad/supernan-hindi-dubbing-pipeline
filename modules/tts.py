@@ -81,83 +81,13 @@ def _split_into_sentences(text: str, max_chars: int = XTTS_CHAR_LIMIT) -> list[s
     return [c for c in chunks if c.strip()]
 
 
-# ── Duration matching ─────────────────────────────────────────────────────────
+# ── Audio utilities ───────────────────────────────────────────────────────────
 
-def _hard_trim_pad(audio: np.ndarray, sr: int, target_duration: float) -> np.ndarray:
-    """Trim or zero-pad audio to exactly target_duration seconds."""
-    target_samples = int(round(target_duration * sr))
-    if len(audio) >= target_samples:
-        return audio[:target_samples]
-    pad = np.zeros(target_samples - len(audio), dtype=audio.dtype)
-    return np.concatenate([audio, pad])
-
-
-def _fit_audio(
-    audio: np.ndarray,
-    sr: int,
-    target_duration: float,
-) -> np.ndarray:
-    """
-    Fit *audio* to *target_duration* seconds.
-
-    Strategy:
-      • ratio = audio_duration / target_duration
-      • 0.85 ≤ ratio ≤ 1.5  → pyrubberband stretch (natural speed change)
-      • ratio > 1.5           → speed up, clamped to 2.0x max
-      • ratio < 0.85          → speech is shorter than slot; return as-is
-                                 (DO NOT PAD — assemble.py will trim the video
-                                 to match the audio length instead)
-    """
-    current_duration = len(audio) / sr
-    if target_duration <= 0:
-        return audio
-
-    ratio = current_duration / target_duration
-
-    logger.info(f"_fit_audio: audio={current_duration:.2f}s target={target_duration:.2f}s ratio={ratio:.3f}")
-
-    if 0.85 <= ratio <= 1.5:
-        # Normal speed adjustment — sounds good
-        try:
-            import pyrubberband as pyrb
-            audio = pyrb.time_stretch(audio, sr, rate=ratio)
-            # Hard trim/pad to exact length after stretching
-            audio = _hard_trim_pad(audio, sr, target_duration)
-        except Exception as e:
-            logger.warning(f"pyrubberband failed ({e}); using naive resample")
-            target_len = int(target_duration * sr)
-            audio = np.interp(
-                np.linspace(0, len(audio) - 1, target_len),
-                np.arange(len(audio)),
-                audio,
-            ).astype(audio.dtype)
-    elif ratio > 1.5:
-        # Speech is much longer than slot; must speed up
-        # Clamp to max 2.0 to avoid chipmunk effect
-        clamped = min(ratio, 2.0)
-        try:
-            import pyrubberband as pyrb
-            audio = pyrb.time_stretch(audio, sr, rate=clamped)
-        except Exception as e:
-            logger.warning(f"pyrubberband failed ({e}); using naive resample")
-            target_len = int(target_duration * sr)
-            audio = np.interp(
-                np.linspace(0, len(audio) - 1, target_len),
-                np.arange(len(audio)),
-                audio,
-            ).astype(audio.dtype)
-    else:
-        # ratio < 0.85 → speech is much shorter than the segment
-        # Pad with silence to match the target duration EXACTLY.
-        # This is CRITICAL for maintaining audio sync and avoiding
-        # assemble.py accidentally stretching a 5s clip to 20s.
-        logger.info(
-            f"Audio ({current_duration:.1f}s) much shorter than target ({target_duration:.1f}s); "
-            "padding with silence to preserve sync"
-        )
-        audio = _hard_trim_pad(audio, sr, target_duration)
-
-    return audio  # return the fitted/padded audio
+def _create_silence(duration: float, sr: int) -> np.ndarray:
+    """Create silence of exactly target_duration seconds."""
+    if duration <= 0:
+        return np.zeros(0, dtype=np.float32)
+    return np.zeros(int(round(duration * sr)), dtype=np.float32)
 
 
 # ── XTTS synthesis ────────────────────────────────────────────────────────────
@@ -263,44 +193,46 @@ def synthesise(
     tts = _load_xtts()
 
     segments = hindi_segments["segments"]
-    chunk_paths: list[str] = []
+    
+    # We will build the final track chunk by chunk
+    final_audio_chunks: list[np.ndarray] = []
+    current_time = 0.0
 
     for i, seg in enumerate(segments):
+        start_time = seg.get("start", 0.0)
         hindi_text = seg.get("hindi", "").strip()
-        target_duration = seg["end"] - seg["start"]
 
+        # 1. Fill silence if the segment starts later than our current time
+        if start_time > current_time:
+            silence_dur = start_time - current_time
+            logger.info(f"Padding {silence_dur:.2f}s of silence before segment {i}")
+            final_audio_chunks.append(_create_silence(silence_dur, SAMPLE_RATE))
+            current_time = start_time
+            
         if not hindi_text:
-            logger.warning(f"Segment {i} has empty Hindi text; inserting silence")
-            silence = np.zeros(int(target_duration * SAMPLE_RATE), dtype=np.float32)
-            chunk_path = os.path.join(tmp_dir, f"seg_{i:04d}.wav")
-            sf.write(chunk_path, silence, SAMPLE_RATE)
-            chunk_paths.append(chunk_path)
+            logger.warning(f"Segment {i} has empty Hindi text; skipping synthesis")
             continue
 
         sentences = _split_into_sentences(hindi_text)
-        logger.info(
-            f"[{i+1}/{len(segments)}] Synthesising {len(sentences)} sentence(s) "
-            f"(target: {target_duration:.1f}s): '{hindi_text[:60]}…'"
-            if len(hindi_text) > 60 else
-            f"[{i+1}/{len(segments)}] Synthesising '{hindi_text}'"
-        )
+        logger.info(f"[{i+1}/{len(segments)}] Synthesising '{hindi_text[:60]}…'")
 
-        # Synthesise all sentences and concatenate
+        # 2. Synthesise all sentences and concatenate
         raw_audio = _synth_sentences(tts, sentences, speaker_wav, tmp_dir, f"seg{i}")
         raw_duration = len(raw_audio) / SAMPLE_RATE
-        logger.info(f"  raw synthesis: {raw_duration:.2f}s → fitting to {target_duration:.2f}s")
+        logger.info(f"  → Natural speech duration: {raw_duration:.2f}s")
 
-        # Fit to target duration
-        fitted = _fit_audio(raw_audio, SAMPLE_RATE, target_duration)
+        # 3. Append the natural speech without any distortion!
+        final_audio_chunks.append(raw_audio)
+        current_time += raw_duration
 
-        chunk_path = os.path.join(tmp_dir, f"seg_{i:04d}.wav")
-        sf.write(chunk_path, fitted, SAMPLE_RATE)
-        chunk_paths.append(chunk_path)
-
-    # ── Concatenate all segment WAVs ─────────────────────────────────────────
+    # ── Concatenate all segment arrays into one final WAV ─────────────────────
+    if not final_audio_chunks:
+        final_audio_chunks.append(_create_silence(1.0, SAMPLE_RATE))
+        
+    full_audio = np.concatenate(final_audio_chunks)
     out_path = os.path.join(tmp_dir, "hindi_dubbed.wav")
-    _concat_wavs(chunk_paths, out_path)
-    logger.info(f"Hindi dubbed audio → {out_path}")
+    sf.write(out_path, full_audio, SAMPLE_RATE)
+    logger.info(f"Hindi dubbed natural audio → {out_path}")
     return out_path
 
 
