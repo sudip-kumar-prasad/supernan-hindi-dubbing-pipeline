@@ -25,23 +25,52 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Map Whisper language codes → deep-translator source codes
+# (deep-translator uses ISO 639-1 or full names for some)
+LANG_CODE_MAP = {
+    "kn": "kn",   # Kannada
+    "en": "en",   # English
+    "hi": "hi",   # Hindi
+    "mr": "mr",   # Marathi
+    "te": "te",   # Telugu
+    "ta": "ta",   # Tamil
+    "ml": "ml",   # Malayalam
+    "gu": "gu",   # Gujarati
+    "bn": "bn",   # Bengali
+    "pa": "pa",   # Punjabi
+    "si": "si",   # Sinhala
+    "or": "or",   # Odia
+}
+
+# Map Whisper codes → IndicTrans2 lang tags
+INDICTRANS2_LANG_MAP = {
+    "kn": "kan_Knda",
+    "en": "eng_Latn",
+    "hi": "hin_Deva",
+    "mr": "mar_Deva",
+    "te": "tel_Telu",
+    "ta": "tam_Taml",
+    "ml": "mal_Mlym",
+}
+
 # ── IndicTrans2 backend ───────────────────────────────────────────────────────
 
-def _translate_indictrans2(texts: list[str], src_lang: str = "eng_Latn") -> list[str]:
+def _translate_indictrans2(texts: list[str], src_lang: str = "kn") -> list[str]:
     """Translate a list of strings via IndicTrans2."""
     try:
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
         from IndicTransToolkit import IndicProcessor  # type: ignore
 
-        model_name = "ai4bharat/indictrans2-en-indic-1B"
-        logger.info(f"Loading IndicTrans2 model: {model_name}")
+        model_name = "ai4bharat/indictrans2-indic-indic-1B"
+        src_tag = INDICTRANS2_LANG_MAP.get(src_lang, f"{src_lang}_Latn")
+        logger.info(f"Loading IndicTrans2 model: {model_name} ({src_tag} → hin_Deva)")
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True)
         ip = IndicProcessor(inference=True)
 
         tgt_lang = "hin_Deva"
-        batch = ip.preprocess_batch(texts, src_lang=src_lang, tgt_lang=tgt_lang)
+        batch = ip.preprocess_batch(texts, src_lang=src_tag, tgt_lang=tgt_lang)
         inputs = tokenizer(batch, return_tensors="pt", padding=True, truncation=True)
 
         with __import__("torch").no_grad():
@@ -57,11 +86,12 @@ def _translate_indictrans2(texts: list[str], src_lang: str = "eng_Latn") -> list
 
 # ── deep-translator backend (free Google Translate) ──────────────────────────
 
-def _translate_deep(texts: list[str]) -> list[str]:
-    """Translate a list of strings via deep-translator (Google free tier)."""
+def _translate_deep(texts: list[str], src_lang: str = "kn") -> list[str]:
+    """Translate via deep-translator (Google free tier)."""
     from deep_translator import GoogleTranslator
 
-    translator = GoogleTranslator(source="en", target="hi")
+    dl_src = LANG_CODE_MAP.get(src_lang, src_lang)
+    translator = GoogleTranslator(source=dl_src, target="hi")
     results: list[str] = []
     for text in texts:
         if not text.strip():
@@ -97,17 +127,18 @@ def translate(
 
     segments = transcript["segments"]
     source_texts = [s["text"] for s in segments]
+    src_lang = transcript.get("language", "kn")   # default Kannada for this video
 
-    logger.info(f"Translating {len(source_texts)} segments to Hindi")
+    logger.info(f"Translating {len(source_texts)} segments {src_lang} → Hindi")
 
     hindi_texts: list[str]
     if use_indictrans:
         try:
-            hindi_texts = _translate_indictrans2(source_texts)
+            hindi_texts = _translate_indictrans2(source_texts, src_lang=src_lang)
         except Exception:
-            hindi_texts = _translate_deep(source_texts)
+            hindi_texts = _translate_deep(source_texts, src_lang=src_lang)
     else:
-        hindi_texts = _translate_deep(source_texts)
+        hindi_texts = _translate_deep(source_texts, src_lang=src_lang)
 
     output_segments = []
     for seg, hindi in zip(segments, hindi_texts):

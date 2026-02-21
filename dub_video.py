@@ -107,10 +107,11 @@ def _load_checkpoint(tmp_dir: str, stage: str) -> dict | None:
 def run(
     input_path: str,
     output_path: str = "output.mp4",
-    start: float = 15.0,
-    end: float = 30.0,
+    start: float = 45.0,
+    end: float = 60.0,
     tmp_dir: str = "tmp",
     model_size: str = "base",
+    source_lang: str | None = None,
     skip_lipsync: bool = False,
     skip_enhance: bool = False,
     use_indictrans: bool = True,
@@ -124,9 +125,10 @@ def run(
     ----------
     input_path     : Source video file
     output_path    : Where to write the final dubbed video
-    start / end    : Clip window in seconds (default 15–30)
+    start / end    : Clip window in seconds (default 45–60, confirmed speech in source video)
     tmp_dir        : Folder for intermediate files
     model_size     : Whisper model size ('tiny','base','small','medium','large-v3')
+    source_lang    : Source language code (None = auto-detect via Whisper)
     skip_lipsync   : Skip lip-sync stage (CPU testing)
     skip_enhance   : Skip face-restoration stage (faster run)
     use_indictrans : Use IndicTrans2 for translation; fall back to deep-translator
@@ -168,7 +170,11 @@ def run(
             transcript = ckpt
         else:
             transcript = transcribe(
-                audio_path, model_size=model_size, tmp_dir=tmp_dir, batch=batch
+                audio_path,
+                model_size=model_size,
+                language=source_lang,   # None = auto-detect
+                tmp_dir=tmp_dir,
+                batch=batch,
             )
             _save_checkpoint(tmp_dir, "transcribe", transcript)
 
@@ -176,6 +182,11 @@ def run(
         f"   Detected: {transcript.get('language', '?')} | "
         f"{len(transcript['segments'])} segments"
     )
+    if len(transcript['segments']) == 0:
+        logger.warning(
+            "⚠  No speech segments detected! "
+            "Try a different --start/--end window or use --model large-v3 for better accuracy."
+        )
 
     # ── Stage 3: Translate ────────────────────────────────────────────────────
     with Stage("3 · Translate → Hindi"):
@@ -243,15 +254,16 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--input", "-i", required=True, help="Source video file (e.g. input.mp4)")
     p.add_argument("--output", "-o", default="output.mp4", help="Output file (default: output.mp4)")
-    p.add_argument("--start", "-s", type=float, default=15.0, help="Clip start time in seconds (default: 15)")
-    p.add_argument("--end", "-e", type=float, default=30.0, help="Clip end time in seconds (default: 30)")
+    p.add_argument("--start", "-s", type=float, default=45.0, help="Clip start (seconds). Default: 45 (confirmed speech window for source video)")
+    p.add_argument("--end", "-e", type=float, default=60.0, help="Clip end (seconds). Default: 60")
     p.add_argument("--tmp-dir", default="tmp", help="Directory for intermediate files (default: tmp/)")
     p.add_argument(
         "--model",
         default="base",
         choices=["tiny", "base", "small", "medium", "large-v3"],
-        help="Whisper model size (default: base)",
+        help="Whisper model size (default: base; use large-v3 on Colab GPU for best results)",
     )
+    p.add_argument("--source-lang", default=None, help="Source language code (default: auto-detect). E.g. kn, en, mr")
     p.add_argument("--skip-lipsync", action="store_true", help="Skip lip-sync stage (CPU-only testing)")
     p.add_argument("--skip-enhance", action="store_true", help="Skip face restoration stage")
     p.add_argument("--no-indictrans", action="store_true", help="Use deep-translator instead of IndicTrans2")
@@ -276,6 +288,7 @@ def main() -> None:
         end=args.end,
         tmp_dir=args.tmp_dir,
         model_size=args.model,
+        source_lang=args.source_lang,
         skip_lipsync=args.skip_lipsync,
         skip_enhance=args.skip_enhance,
         use_indictrans=not args.no_indictrans,

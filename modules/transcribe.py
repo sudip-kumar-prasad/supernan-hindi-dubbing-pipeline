@@ -61,7 +61,7 @@ def _split_audio_on_silence(
 def transcribe(
     audio_path: str,
     model_size: str = "base",
-    language: str = "en",
+    language: str | None = None,   # None = auto-detect (required for non-English sources)
     tmp_dir: str = "tmp",
     batch: bool = False,
 ) -> dict:
@@ -88,6 +88,11 @@ def transcribe(
     logger.info(f"Loading Whisper model: {model_size}")
     model = whisper.load_model(model_size)
 
+    if language:
+        logger.info(f"Source language: {language}")
+    else:
+        logger.info("Source language: auto-detect")
+
     if batch:
         logger.info("Batch mode: splitting audio on silence")
         from pydub import AudioSegment
@@ -101,9 +106,11 @@ def transcribe(
                 chunk.export(tmp_f.name, format="wav")
                 result = model.transcribe(
                     tmp_f.name,
-                    language=language,
+                    language=language,   # None = auto-detect per chunk
                     task="transcribe",
                     verbose=False,
+                    no_speech_threshold=0.3,
+                    temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
                 )
             # Re-align timestamps
             for seg in result["segments"]:
@@ -114,15 +121,17 @@ def transcribe(
                         "text": seg["text"].strip(),
                     }
                 )
-        detected_lang = language or "en"
+        detected_lang = language or result.get("language", "unknown")
 
     else:
         logger.info(f"Transcribing {audio_path}")
         result = model.transcribe(
             audio_path,
-            language=language,
+            language=language,   # None = auto-detect
             task="transcribe",
             verbose=False,
+            no_speech_threshold=0.3,
+            temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
         )
         all_segments = [
             {
