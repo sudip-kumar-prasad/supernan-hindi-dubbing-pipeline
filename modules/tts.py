@@ -148,15 +148,16 @@ def _fit_audio(
             ).astype(audio.dtype)
     else:
         # ratio < 0.85 → speech is much shorter than the segment
-        # Return audio at its NATURAL length — do NOT pad with silence.
-        # assemble.py will detect the short audio and trim the video to match.
+        # Pad with silence to match the target duration EXACTLY.
+        # This is CRITICAL for maintaining audio sync and avoiding
+        # assemble.py accidentally stretching a 5s clip to 20s.
         logger.info(
             f"Audio ({current_duration:.1f}s) much shorter than target ({target_duration:.1f}s); "
-            "returning at natural length — assemble.py will trim video to match"
+            "padding with silence to preserve sync"
         )
-        return audio  # ← natural length, no padding
+        audio = _hard_trim_pad(audio, sr, target_duration)
 
-    return audio  # for ratio > 1.5 branch (already trimmed above if needed)
+    return audio  # return the fitted/padded audio
 
 
 # ── XTTS synthesis ────────────────────────────────────────────────────────────
