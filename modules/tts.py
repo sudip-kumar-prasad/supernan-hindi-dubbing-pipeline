@@ -103,10 +103,10 @@ def _fit_audio(
     Strategy:
       • ratio = audio_duration / target_duration
       • 0.85 ≤ ratio ≤ 1.5  → pyrubberband stretch (natural speed change)
-      • ratio > 1.5           → must speed up; rubberband or naive resample
-      • ratio < 0.85          → speech is much shorter than target; just pad
-                                 with silence (sounds far better than 2× slow)
-    Final hard trim/pad to exact sample count.
+      • ratio > 1.5           → speed up, clamped to 2.0x max
+      • ratio < 0.85          → speech is shorter than slot; return as-is
+                                 (DO NOT PAD — assemble.py will trim the video
+                                 to match the audio length instead)
     """
     current_duration = len(audio) / sr
     if target_duration <= 0:
@@ -114,13 +114,15 @@ def _fit_audio(
 
     ratio = current_duration / target_duration
 
-    logger.debug(f"_fit_audio: audio={current_duration:.2f}s target={target_duration:.2f}s ratio={ratio:.3f}")
+    logger.info(f"_fit_audio: audio={current_duration:.2f}s target={target_duration:.2f}s ratio={ratio:.3f}")
 
     if 0.85 <= ratio <= 1.5:
         # Normal speed adjustment — sounds good
         try:
             import pyrubberband as pyrb
             audio = pyrb.time_stretch(audio, sr, rate=ratio)
+            # Hard trim/pad to exact length after stretching
+            audio = _hard_trim_pad(audio, sr, target_duration)
         except Exception as e:
             logger.warning(f"pyrubberband failed ({e}); using naive resample")
             target_len = int(target_duration * sr)
@@ -145,14 +147,16 @@ def _fit_audio(
                 audio,
             ).astype(audio.dtype)
     else:
-        # ratio < 0.85 → audio is less than 85% of target duration
-        # Pad with silence — far better than slowing speech to 0.5× speed
+        # ratio < 0.85 → speech is much shorter than the segment
+        # Return audio at its NATURAL length — do NOT pad with silence.
+        # assemble.py will detect the short audio and trim the video to match.
         logger.info(
             f"Audio ({current_duration:.1f}s) much shorter than target ({target_duration:.1f}s); "
-            "padding with silence instead of slow-stretching"
+            "returning at natural length — assemble.py will trim video to match"
         )
+        return audio  # ← natural length, no padding
 
-    return _hard_trim_pad(audio, sr, target_duration)
+    return audio  # for ratio > 1.5 branch (already trimmed above if needed)
 
 
 # ── XTTS synthesis ────────────────────────────────────────────────────────────
