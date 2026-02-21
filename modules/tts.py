@@ -39,25 +39,42 @@ def _stretch_audio(
 ) -> np.ndarray:
     """
     Time-stretch *audio* to *target_duration* seconds (pitch-preserving).
-    Skips stretching if the ratio is within *tolerance*.
+    Clamps ratio to [0.5, 2.0] to prevent extreme distortion.
     """
     current_duration = len(audio) / sr
     ratio = current_duration / target_duration  # >1 → speed up, <1 → slow down
 
+    # Clamp: never stretch more than 2× slower or 2× faster
+    ratio = max(0.5, min(ratio, 2.0))
+
     if abs(ratio - 1.0) < tolerance:
-        return audio
+        # Already close — just trim/pad to exact length
+        return _hard_trim_pad(audio, sr, target_duration)
 
     try:
         import pyrubberband as pyrb
-        return pyrb.time_stretch(audio, sr, rate=ratio)
+        stretched = pyrb.time_stretch(audio, sr, rate=ratio)
     except Exception as e:
         logger.warning(f"pyrubberband unavailable ({e}); using naive resampling")
         target_len = int(target_duration * sr)
-        return np.interp(
+        stretched = np.interp(
             np.linspace(0, len(audio) - 1, target_len),
             np.arange(len(audio)),
             audio,
         ).astype(audio.dtype)
+
+    # Hard trim/pad to guarantee exact duration
+    return _hard_trim_pad(stretched, sr, target_duration)
+
+
+def _hard_trim_pad(audio: np.ndarray, sr: int, target_duration: float) -> np.ndarray:
+    """Trim or zero-pad audio to exactly target_duration seconds."""
+    target_samples = int(round(target_duration * sr))
+    if len(audio) >= target_samples:
+        return audio[:target_samples]
+    # Pad with silence
+    pad = np.zeros(target_samples - len(audio), dtype=audio.dtype)
+    return np.concatenate([audio, pad])
 
 
 # ── XTTS synthesis ────────────────────────────────────────────────────────────
@@ -129,12 +146,24 @@ def synthesise(
             f"[{i+1}/{len(segments)}] Synthesising: '{hindi_text}'"
         )
 
-        tts.tts_to_file(
-            text=hindi_text,
-            speaker_wav=speaker_wav,
-            language="hi",
-            file_path=raw_path,
-        )
+        # speed=1.2 – Hindi text is typically 20-30% longer than source;
+        # speaking slightly faster keeps the output inside the segment window.
+        try:
+            tts.tts_to_file(
+                text=hindi_text,
+                speaker_wav=speaker_wav,
+                language="hi",
+                file_path=raw_path,
+                speed=1.2,
+            )
+        except TypeError:
+            # Older TTS API without speed param
+            tts.tts_to_file(
+                text=hindi_text,
+                speaker_wav=speaker_wav,
+                language="hi",
+                file_path=raw_path,
+            )
 
         # Load, stretch, save
         audio, sr = sf.read(raw_path)

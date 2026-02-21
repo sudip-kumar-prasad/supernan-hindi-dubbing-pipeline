@@ -39,6 +39,20 @@ def assemble(
 
     logger.info(f"Assembling final video → {output_path}")
 
+    # Get exact video duration so audio is trimmed to match
+    import subprocess as _sp, json as _json
+    probe = _sp.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", video_path],
+        capture_output=True, text=True,
+    )
+    try:
+        streams = _json.loads(probe.stdout).get("streams", [])
+        vid_duration = next(
+            (float(s["duration"]) for s in streams if s["codec_type"] == "video"), None
+        )
+    except Exception:
+        vid_duration = None
+
     audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11" if normalize_audio else "anull"
 
     cmd = [
@@ -53,10 +67,14 @@ def assemble(
         "-preset", "slow",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-shortest",
         "-movflags", "+faststart",
-        "-y", output_path,
     ]
+
+    # Hard-trim both streams to video duration to guarantee A/V sync
+    if vid_duration:
+        cmd += ["-t", str(vid_duration)]
+
+    cmd += ["-y", output_path]
 
     logger.info("Running: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
