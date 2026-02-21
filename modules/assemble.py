@@ -106,20 +106,30 @@ def assemble(
             logger.info(f"Applying atempo={ratio:.4f} to compress audio to video")
             audio_filters.append(_build_atempo_chain(ratio))
 
+    final_mix_filter = "anull"
     if normalize_audio and (not aud_dur or not vid_dur or (aud_dur / vid_dur) >= 0.5):
-        # Skip loudnorm when audio is very short relative to clip
-        # (mostly silence → loudnorm distorts)
-        audio_filters.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+        # Apply loudnorm to the final mixed audio
+        final_mix_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
     af_str = ",".join(audio_filters) if audio_filters else "anull"
+
+    # [0:a:0] is original background audio (lowered to 15% volume)
+    # [1:a:0] is the new dubbed audio (processed with atempo/apad)
+    # We mix them together using amix, and apply the final normalization/volume bump.
+    filter_complex = (
+        f"[0:a:0]volume=0.15[bg]; "
+        f"[1:a:0]{af_str}[dub]; "
+        f"[bg][dub]amix=inputs=2:duration=first:dropout_transition=2,"
+        f"volume=2.0,{final_mix_filter}[aout]"  # amix halves volume, so we double it before loudnorm
+    )
 
     cmd = [
         "ffmpeg",
         "-i", video_path,
         "-i", audio_path,
+        "-filter_complex", filter_complex,
         "-map", "0:v:0",   # video from first input
-        "-map", "1:a:0",   # audio from second input
-        "-af", af_str,
+        "-map", "[aout]",  # mixed audio from filter_complex
         "-c:v", "libx264",
         "-crf", "18",
         "-preset", "fast",   # faster encode, same quality
