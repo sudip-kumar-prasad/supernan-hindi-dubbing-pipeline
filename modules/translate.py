@@ -59,7 +59,7 @@ def _translate_indictrans2(texts: list[str], src_lang: str = "kn") -> list[str]:
     """Translate a list of strings via IndicTrans2."""
     try:
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-        from IndicTransToolkit import IndicProcessor  # type: ignore
+        from IndicTransToolkit.processor import IndicProcessor  # type: ignore
 
         model_name = "ai4bharat/indictrans2-indic-indic-1B"
         src_tag = INDICTRANS2_LANG_MAP.get(src_lang, f"{src_lang}_Latn")
