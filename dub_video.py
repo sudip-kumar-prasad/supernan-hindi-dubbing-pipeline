@@ -235,7 +235,12 @@ def run(
 
     # ── Stage 7: Assemble ─────────────────────────────────────────────────────
     with Stage("7 · Assemble final output"):
-        output = assemble(enhanced_path, dubbed_wav_path, output_path=output_path)
+        output = assemble(
+            video_path=enhanced_path, 
+            dubbed_audio_path=dubbed_wav_path, 
+            bg_audio_path=clip_path,
+            output_path=output_path
+        )
 
     total_elapsed = time.perf_counter() - total_t0
     logger.info(f"{'═' * 50}")

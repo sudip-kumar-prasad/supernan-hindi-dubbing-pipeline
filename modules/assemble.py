@@ -74,12 +74,14 @@ def _build_atempo_chain(ratio: float) -> str:
 
 def assemble(
     video_path: str,
-    audio_path: str,
+    dubbed_audio_path: str,
+    bg_audio_path: str | None = None,
     output_path: str = "output.mp4",
     normalize_audio: bool = True,
 ) -> str:
     """
-    Mux *video_path* (video stream) + *audio_path* (audio) into *output_path*.
+    Mux *video_path* (video stream) + *dubbed_audio_path* (Hindi audio) + 
+    *bg_audio_path* (original background) into *output_path*.
 
     A/V sync strategy
     -----------------
@@ -96,9 +98,9 @@ def assemble(
     logger.info(f"Assembling final video → {output_path}")
 
     vid_dur = _get_duration(video_path)
-    aud_dur = _get_duration(audio_path)
+    aud_dur = _get_duration(dubbed_audio_path)
 
-    logger.info(f"Video duration: {vid_dur:.3f}s | Audio duration: {aud_dur:.3f}s")
+    logger.info(f"Video duration: {vid_dur:.3f}s | Dubbed audio: {aud_dur:.3f}s")
 
     audio_filters = []
     out_duration = vid_dur  # always output the full clip length
@@ -131,21 +133,22 @@ def assemble(
 
     af_str = ",".join(audio_filters) if audio_filters else "anull"
 
-    has_bg_audio = _has_audio(video_path)
+    has_bg_audio = bg_audio_path is not None and _has_audio(bg_audio_path)
     
     cmd = [
         "ffmpeg",
         "-i", video_path,
-        "-i", audio_path,
+        "-i", dubbed_audio_path,
     ]
 
     if has_bg_audio:
+        cmd.extend(["-i", bg_audio_path])
         # Mix original background audio (lowered to 15% volume) with the new dubbed audio
         filter_complex = (
-            f"[0:a:0]volume=0.15[bg]; "
-            f"[1:a:0]{af_str}[dub]; "
+            f"[2:a:0]volume=0.15[bg]; "           # third input is bg_audio_path
+            f"[1:a:0]{af_str}[dub]; "             # second input is dubbed_audio_path
             f"[bg][dub]amix=inputs=2:duration=first:dropout_transition=2,"
-            f"volume=2.0,{final_mix_filter}[aout]"  # amix halves volume, so we double it before loudnorm
+            f"volume=2.0,{final_mix_filter}[aout]"  # amix halves volume, so we double it
         )
         cmd.extend([
             "-filter_complex", filter_complex,
@@ -153,8 +156,8 @@ def assemble(
             "-map", "[aout]",  # mixed audio from filter_complex
         ])
     else:
-        # Original video has no audio track; just apply filters to the dubbed audio directly
-        logger.info(f"Original video {video_path} has no audio track; skipping background mix.")
+        # No background audio; just apply filters to the dubbed audio directly
+        logger.info("No original background audio found; skipping mix.")
         
         f_chain = []
         if af_str != "anull":
@@ -199,5 +202,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     vid = sys.argv[1] if len(sys.argv) > 1 else "tmp/enhanced.mp4"
     aud = sys.argv[2] if len(sys.argv) > 2 else "tmp/hindi_dubbed.wav"
-    out = sys.argv[3] if len(sys.argv) > 3 else "output.mp4"
-    print(assemble(vid, aud, out))
+    bg = sys.argv[3] if len(sys.argv) > 3 else "tmp/clip.mp4"
+    out = sys.argv[4] if len(sys.argv) > 4 else "output.mp4"
+    print(assemble(vid, aud, bg, out))

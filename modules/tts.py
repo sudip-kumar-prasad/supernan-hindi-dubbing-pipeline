@@ -14,7 +14,7 @@ Key design decisions:
       - Hard trim/pad to exact sample count after any stretching
 
 Dependencies:
-    pip install TTS pyrubberband soundfile pydub
+    pip install TTS pyrubberband soundfile pydub moviepy
     apt-get install -y rubberband-cli   (Colab)
 """
 
@@ -157,7 +157,9 @@ def _synth_sentences(
     if not parts:
         return np.zeros(SAMPLE_RATE, dtype=np.float32)  # 1s silence fallback
 
-    return np.concatenate(parts)
+    # moviepy expects stereo tracks, stack mono into stereo
+    combined = np.concatenate(parts)
+    return np.column_stack((combined, combined))
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -168,14 +170,14 @@ def synthesise(
     tmp_dir: str = "tmp",
 ) -> str:
     """
-    Synthesise Hindi speech for each segment and concatenate into a single WAV.
+    Synthesise Hindi speech for each segment and composite into a single WAV using exact timestamps.
 
     For each segment:
       1. Split Hindi text into ≤140-char sentences (XTTS limit).
       2. Synthesise each sentence separately.
-      3. Concatenate sentence WAVs.
-      4. Fit to target duration (stretch if close, pad if too short).
-      5. Concatenate all segment WAVs into final dubbed track.
+      3. Composite sentences into a moviepy AudioArrayClip.
+      4. Shift clip to the segment's exact start_time using CompositeAudioClip.
+      5. Output the single timeline audio.
 
     Parameters
     ----------
@@ -187,27 +189,17 @@ def synthesise(
     -------
     str – path to the final concatenated Hindi WAV (tmp/hindi_dubbed.wav)
     """
-    import soundfile as sf
+    from moviepy.editor import AudioArrayClip, CompositeAudioClip
 
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
     tts = _load_xtts()
 
     segments = hindi_segments["segments"]
-    
-    # We will build the final track chunk by chunk
-    final_audio_chunks: list[np.ndarray] = []
-    current_time = 0.0
+    audio_clips = []
 
     for i, seg in enumerate(segments):
         start_time = seg.get("start", 0.0)
         hindi_text = seg.get("hindi", "").strip()
-
-        # 1. Fill silence if the segment starts later than our current time
-        if start_time > current_time:
-            silence_dur = start_time - current_time
-            logger.info(f"Padding {silence_dur:.2f}s of silence before segment {i}")
-            final_audio_chunks.append(_create_silence(silence_dur, SAMPLE_RATE))
-            current_time = start_time
             
         if not hindi_text:
             logger.warning(f"Segment {i} has empty Hindi text; skipping synthesis")
@@ -217,22 +209,27 @@ def synthesise(
         logger.info(f"[{i+1}/{len(segments)}] Synthesising '{hindi_text[:60]}…'")
 
         # 2. Synthesise all sentences and concatenate
-        raw_audio = _synth_sentences(tts, sentences, speaker_wav, tmp_dir, f"seg{i}")
-        raw_duration = len(raw_audio) / SAMPLE_RATE
+        raw_audio_stereo = _synth_sentences(tts, sentences, speaker_wav, tmp_dir, f"seg{i}")
+        raw_duration = len(raw_audio_stereo) / SAMPLE_RATE
         logger.info(f"  → Natural speech duration: {raw_duration:.2f}s")
 
-        # 3. Append the natural speech without any distortion!
-        final_audio_chunks.append(raw_audio)
-        current_time += raw_duration
+        # 3. Create AudioArrayClip strictly anchored to its absolute timestamp
+        clip = AudioArrayClip(raw_audio_stereo, fps=SAMPLE_RATE).set_start(start_time)
+        audio_clips.append(clip)
 
-    # ── Concatenate all segment arrays into one final WAV ─────────────────────
-    if not final_audio_chunks:
-        final_audio_chunks.append(_create_silence(1.0, SAMPLE_RATE))
+    # ── Composite all segment clips into one final WAV timeline ────────────────
+    if not audio_clips:
+        logger.warning("No audio segments synthesized. Creating silent audio.")
+        silence = _create_silence(1.0, SAMPLE_RATE)
+        silence_stereo = np.column_stack((silence, silence))
+        clip = AudioArrayClip(silence_stereo, fps=SAMPLE_RATE).set_start(0.0)
+        audio_clips.append(clip)
         
-    full_audio = np.concatenate(final_audio_chunks)
+    final_audio = CompositeAudioClip(audio_clips)
     out_path = os.path.join(tmp_dir, "hindi_dubbed.wav")
-    sf.write(out_path, full_audio, SAMPLE_RATE)
-    logger.info(f"Hindi dubbed natural audio → {out_path}")
+    final_audio.write_audiofile(out_path, fps=SAMPLE_RATE, logger=None)
+    
+    logger.info(f"Hindi dubbed composite audio → {out_path}")
     return out_path
 
 

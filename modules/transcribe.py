@@ -35,24 +35,32 @@ def _split_audio_on_silence(
     split on detected silent regions.
     """
     from pydub import AudioSegment
-    from pydub.silence import split_on_silence
+    from pydub.silence import detect_nonsilent
 
     audio = AudioSegment.from_wav(audio_path)
-    chunks = split_on_silence(
+    
+    # Returns raw millisecond timestamp pairs for spoken regions
+    nonsilent_ranges = detect_nonsilent(
         audio,
         min_silence_len=min_silence_ms,
         silence_thresh=silence_thresh_db,
-        keep_silence=keep_silence_ms,
+        seek_step=10,
     )
-    if not chunks:
+
+    if not nonsilent_ranges:
         # No silence detected → treat whole file as one chunk
         return [(0.0, audio)]
 
     offsets: list[tuple[float, "AudioSegment"]] = []
-    cursor_ms = 0
-    for chunk in chunks:
-        offsets.append((cursor_ms / 1000.0, chunk))
-        cursor_ms += len(chunk)
+    
+    for start_ms, end_ms in nonsilent_ranges:
+        # Prepend/append keep_silence_ms without exceeding audio bounds
+        start_padded = max(0, start_ms - keep_silence_ms)
+        end_padded = min(len(audio), end_ms + keep_silence_ms)
+        
+        chunk = audio[start_padded:end_padded]
+        offsets.append((start_padded / 1000.0, chunk))
+
     return offsets
 
 
