@@ -190,9 +190,13 @@ def synthesise(
     str – path to the final concatenated Hindi WAV (tmp/hindi_dubbed.wav)
     """
     try:
-        from moviepy import AudioArrayClip, CompositeAudioClip
-    except ImportError:
         from moviepy.editor import AudioArrayClip, CompositeAudioClip
+    except ImportError:
+        try:
+            from moviepy import AudioArrayClip, CompositeAudioClip
+        except ImportError:
+            # Fallback for some weird moviepy versions
+            from moviepy.audio.AudioClip import AudioArrayClip, CompositeAudioClip
 
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
     tts = _load_xtts()
