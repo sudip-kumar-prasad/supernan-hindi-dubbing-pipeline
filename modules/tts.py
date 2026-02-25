@@ -90,6 +90,46 @@ def _create_silence(duration: float, sr: int) -> np.ndarray:
     return np.zeros(int(round(duration * sr)), dtype=np.float32)
 
 
+def _stretch_audio(audio: np.ndarray, sr: int, ratio: float) -> np.ndarray:
+    """Stretch audio duration locally via ffmpeg (more robust than pyrubberband)."""
+    if 0.98 <= ratio <= 1.02:
+        return audio
+        
+    import subprocess
+    import soundfile as sf
+
+    filters = []
+    r = ratio
+    # ffmpeg atempo only accepts values in [0.5, 2.0]
+    while r > 2.0:
+        filters.append("atempo=2.0")
+        r /= 2.0
+    while r < 0.5:
+        filters.append("atempo=0.5")
+        r /= 0.5
+    filters.append(f"atempo={r:.6f}")
+    af_str = ",".join(filters)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f_in, \
+         tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f_out:
+        in_path, out_path = f_in.name, f_out.name
+        
+    try:
+        sf.write(in_path, audio, sr)
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", in_path, "-af", af_str, out_path],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        stretched, _ = sf.read(out_path)
+        # Ensure it's returned as 2D stereo if it was input as 2D
+        if stretched.ndim == 1 and audio.ndim == 2:
+            stretched = np.column_stack((stretched, stretched))
+        return stretched.astype(np.float32)
+    finally:
+        if os.path.exists(in_path): os.unlink(in_path)
+        if os.path.exists(out_path): os.unlink(out_path)
+
+
 # ── XTTS synthesis ────────────────────────────────────────────────────────────
 
 def _load_xtts():
@@ -203,9 +243,14 @@ def synthesise(
 
     segments = hindi_segments["segments"]
     audio_clips = []
+    
+    # Track the end time of the previous clip to prevent garbled overlapping speech
+    last_end_time = 0.0
 
     for i, seg in enumerate(segments):
-        start_time = seg.get("start", 0.0)
+        target_start = seg.get("start", 0.0)
+        target_end = seg.get("end", target_start + 2.0)
+        target_duration = target_end - target_start
         hindi_text = seg.get("hindi", "").strip()
             
         if not hindi_text:
@@ -218,12 +263,27 @@ def synthesise(
         # 2. Synthesise all sentences and concatenate
         raw_audio_stereo = _synth_sentences(tts, sentences, speaker_wav, tmp_dir, f"seg{i}")
         raw_duration = len(raw_audio_stereo) / SAMPLE_RATE
-        logger.info(f"  → Natural speech duration: {raw_duration:.2f}s")
+        logger.info(f"  → Natural speech duration: {raw_duration:.2f}s | Target: {target_duration:.2f}s")
+        
+        # 3. Time stretch if needed to roughly fit the target duration
+        if raw_duration > 0 and target_duration > 0:
+            ratio = raw_duration / target_duration
+            if ratio < 0.85 or ratio > 1.15:
+                logger.info(f"  → Applying atempo ({ratio:.2f}x) to precisely fit segment window")
+                raw_audio_stereo = _stretch_audio(raw_audio_stereo, SAMPLE_RATE, ratio)
+                raw_duration = len(raw_audio_stereo) / SAMPLE_RATE
+                
+        # 4. Waterfall logic to absolutely prevent overlapping clips (garbled audio)
+        actual_start = max(target_start, last_end_time + 0.1)
+        if actual_start > target_start + 0.2:
+            logger.info(f"  → Waterfall shift: delayed by {actual_start - target_start:.2f}s to prevent overlap")
 
-        # 3. Create AudioArrayClip strictly anchored to its absolute timestamp
+        # 5. Create AudioArrayClip strictly anchored to its absolute timestamp
         clip = AudioArrayClip(raw_audio_stereo, fps=SAMPLE_RATE)
-        clip = clip.with_start(start_time) if hasattr(clip, "with_start") else clip.set_start(start_time)
+        clip = clip.with_start(actual_start) if hasattr(clip, "with_start") else clip.set_start(actual_start)
         audio_clips.append(clip)
+        
+        last_end_time = actual_start + raw_duration
 
     # ── Composite all segment clips into one final WAV timeline ────────────────
     if not audio_clips:

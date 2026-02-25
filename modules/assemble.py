@@ -127,8 +127,7 @@ def assemble(
             audio_filters.append(_build_atempo_chain(ratio))
 
     final_mix_filter = "anull"
-    if normalize_audio and (not aud_dur or not vid_dur or (aud_dur / vid_dur) >= 0.5):
-        # Apply loudnorm to the final mixed audio
+    if normalize_audio:
         final_mix_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
     af_str = ",".join(audio_filters) if audio_filters else "anull"
@@ -143,12 +142,17 @@ def assemble(
 
     if has_bg_audio:
         cmd.extend(["-i", bg_audio_path])
-        # Mix original background audio (lowered to 15% volume) with the new dubbed audio
+        # Mix original background audio (lowered to 10% volume) with the new dubbed audio.
+        # Apply loudnorm to the dubbed audio BEFORE mixing so background isn't boosted.
+        dub_filters = f"{af_str}"
+        if normalize_audio:
+            dub_filters += f",{final_mix_filter}"
+
         filter_complex = (
-            f"[2:a:0]volume=0.15[bg]; "           # third input is bg_audio_path
-            f"[1:a:0]{af_str}[dub]; "             # second input is dubbed_audio_path
+            f"[2:a:0]volume=0.08[bg]; "           # third input is bg_audio_path
+            f"[1:a:0]{dub_filters}[dub]; "        # normalize & process dubbed audio ONLY
             f"[bg][dub]amix=inputs=2:duration=first:dropout_transition=2,"
-            f"volume=2.0,{final_mix_filter}[aout]"  # amix halves volume, so we double it
+            f"volume=2.0[aout]"                   # mix them safely
         )
         cmd.extend([
             "-filter_complex", filter_complex,
