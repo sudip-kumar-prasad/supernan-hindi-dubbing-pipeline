@@ -171,10 +171,12 @@ def assemble(
         
         final_af = ",".join(f_chain) if f_chain else "anull"
         
+        # When using -filter_complex, we MUST use it for the audio if we want to map video from 0 
+        # and filtered audio from 1. 
         cmd.extend([
+            "-filter_complex", f"[1:a:0]{final_af}[aout]",
             "-map", "0:v:0",   # video from first input
-            "-map", "1:a:0",   # audio from second input
-            "-af", final_af,
+            "-map", "[aout]",  # processed audio
         ])
 
     cmd.extend([
