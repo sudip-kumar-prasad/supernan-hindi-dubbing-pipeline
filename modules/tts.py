@@ -189,7 +189,10 @@ def synthesise(
     -------
     str – path to the final concatenated Hindi WAV (tmp/hindi_dubbed.wav)
     """
-    from moviepy.editor import AudioArrayClip, CompositeAudioClip
+    try:
+        from moviepy import AudioArrayClip, CompositeAudioClip
+    except ImportError:
+        from moviepy.editor import AudioArrayClip, CompositeAudioClip
 
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
     tts = _load_xtts()
@@ -214,7 +217,8 @@ def synthesise(
         logger.info(f"  → Natural speech duration: {raw_duration:.2f}s")
 
         # 3. Create AudioArrayClip strictly anchored to its absolute timestamp
-        clip = AudioArrayClip(raw_audio_stereo, fps=SAMPLE_RATE).set_start(start_time)
+        clip = AudioArrayClip(raw_audio_stereo, fps=SAMPLE_RATE)
+        clip = clip.with_start(start_time) if hasattr(clip, "with_start") else clip.set_start(start_time)
         audio_clips.append(clip)
 
     # ── Composite all segment clips into one final WAV timeline ────────────────
@@ -222,7 +226,8 @@ def synthesise(
         logger.warning("No audio segments synthesized. Creating silent audio.")
         silence = _create_silence(1.0, SAMPLE_RATE)
         silence_stereo = np.column_stack((silence, silence))
-        clip = AudioArrayClip(silence_stereo, fps=SAMPLE_RATE).set_start(0.0)
+        clip = AudioArrayClip(silence_stereo, fps=SAMPLE_RATE)
+        clip = clip.with_start(0.0) if hasattr(clip, "with_start") else clip.set_start(0.0)
         audio_clips.append(clip)
         
     final_audio = CompositeAudioClip(audio_clips)
