@@ -216,14 +216,16 @@ def synthesise(
     tmp_dir: str = "tmp",
 ) -> str:
     """
-    Synthesise Hindi speech for each segment and composite into a single WAV using exact timestamps.
+    Synthesise Hindi speech for each segment and build a timeline WAV using
+    pure numpy — no MoviePy, no atempo stretching, no version issues.
 
-    For each segment:
-      1. Split Hindi text into ≤140-char sentences (XTTS limit).
-      2. Synthesise each sentence separately.
-      3. Composite sentences into a moviepy AudioArrayClip.
-      4. Shift clip to the segment's exact start_time using CompositeAudioClip.
-      5. Output the single timeline audio.
+    Strategy:
+      1. Find the last segment's end time to allocate the output buffer.
+      2. For each segment: synthesise the Hindi text into raw audio.
+      3. Copy that audio into the pre-allocated zero (silent) buffer at the
+         segment's exact start timestamp.
+      4. If a segment would overflow into the next, truncate it cleanly.
+      5. Write the final buffer to a WAV file.
 
     Parameters
     ----------
@@ -233,84 +235,66 @@ def synthesise(
 
     Returns
     -------
-    str – path to the final concatenated Hindi WAV (tmp/hindi_dubbed.wav)
+    str – path to the final WAV (tmp/hindi_dubbed.wav)
     """
-    try:
-        from moviepy.editor import AudioArrayClip, CompositeAudioClip
-    except ImportError:
-        try:
-            from moviepy import AudioArrayClip, CompositeAudioClip
-        except ImportError:
-            # Fallback for some weird moviepy versions
-            from moviepy.audio.AudioClip import AudioArrayClip, CompositeAudioClip
+    import soundfile as sf
 
     Path(tmp_dir).mkdir(parents=True, exist_ok=True)
     tts = _load_xtts()
 
     segments = hindi_segments["segments"]
-    audio_clips = []
-    
-    # Track the end time of the previous clip to prevent garbled overlapping speech
-    last_end_time = 0.0
+    if not segments:
+        logger.warning("No segments to synthesise.")
+        out_path = os.path.join(tmp_dir, "hindi_dubbed.wav")
+        sf.write(out_path, np.zeros((SAMPLE_RATE, 2), dtype=np.float32), SAMPLE_RATE)
+        return out_path
+
+    # ── 1. Allocate a silent buffer for the full timeline ─────────────────────
+    total_duration = max(seg.get("end", seg.get("start", 0) + 2.0) for seg in segments)
+    total_samples = int(np.ceil(total_duration * SAMPLE_RATE)) + SAMPLE_RATE  # +1s padding
+    timeline = np.zeros((total_samples, 2), dtype=np.float32)
+
+    # ── 2. Synthesise and paste each segment ──────────────────────────────────
+    prev_end_sample = 0  # track end of previous segment to avoid overlap
 
     for i, seg in enumerate(segments):
         target_start = seg.get("start", 0.0)
-        target_end = seg.get("end", target_start + 2.0)
-        target_duration = target_end - target_start
-        hindi_text = seg.get("hindi", "").strip()
-            
+        target_end   = seg.get("end", target_start + 2.0)
+        hindi_text   = seg.get("hindi", "").strip()
+
         if not hindi_text:
-            logger.warning(f"Segment {i} has empty Hindi text; skipping synthesis")
+            logger.warning(f"Segment {i} has empty Hindi text; skipping")
             continue
 
         sentences = _split_into_sentences(hindi_text)
-        logger.info(f"[{i+1}/{len(segments)}] Synthesising '{hindi_text[:60]}…'")
+        logger.info(f"[{i+1}/{len(segments)}] '{hindi_text[:60]}…'")
 
-        # 2. Synthesise all sentences and concatenate
-        raw_audio_stereo = _synth_sentences(tts, sentences, speaker_wav, tmp_dir, f"seg{i}")
-        raw_duration = len(raw_audio_stereo) / SAMPLE_RATE
-        logger.info(f"  → Natural speech duration: {raw_duration:.2f}s | Target: {target_duration:.2f}s")
-        
-        # 3. Time stretch if needed to roughly fit the target duration
-        if raw_duration > 0 and target_duration > 0:
-            target_padding = 0.2 if i < len(segments)-1 else 0.0
-            
-            # The exact window we want this speech to fill
-            desired_duration = target_duration - target_padding
-            
-            ratio = desired_duration / raw_duration
-            if ratio < 0.85 or ratio > 1.15:
-                # Need to stretch or compress
-                logger.info(f"  → Applying atempo to precisely fit segment window (target = {desired_duration:.2f}s)")
-                raw_audio_stereo = _stretch_audio(raw_audio_stereo, SAMPLE_RATE, ratio)
-                raw_duration = len(raw_audio_stereo) / SAMPLE_RATE
-                
-        # 4. Waterfall logic to absolutely prevent overlapping clips (garbled audio)
-        actual_start = max(target_start, last_end_time + 0.1)
-        if actual_start > target_start + 0.2:
-            logger.info(f"  → Waterfall shift: delayed by {actual_start - target_start:.2f}s to prevent overlap")
+        # Synthesise (returns stereo float32 numpy array)
+        raw_stereo = _synth_sentences(tts, sentences, speaker_wav, tmp_dir, f"seg{i}")
+        raw_samples = len(raw_stereo)
+        raw_duration = raw_samples / SAMPLE_RATE
+        logger.info(f"  → synthesised {raw_duration:.2f}s")
 
-        # 5. Create AudioArrayClip strictly anchored to its absolute timestamp
-        clip = AudioArrayClip(raw_audio_stereo, fps=SAMPLE_RATE)
-        clip = clip.with_start(actual_start) if hasattr(clip, "with_start") else clip.set_start(actual_start)
-        audio_clips.append(clip)
-        
-        last_end_time = actual_start + raw_duration
+        # Start sample: must be after the previous segment ends
+        start_sample = max(int(target_start * SAMPLE_RATE), prev_end_sample)
 
-    # ── Composite all segment clips into one final WAV timeline ────────────────
-    if not audio_clips:
-        logger.warning("No audio segments synthesized. Creating silent audio.")
-        silence = _create_silence(1.0, SAMPLE_RATE)
-        silence_stereo = np.column_stack((silence, silence))
-        clip = AudioArrayClip(silence_stereo, fps=SAMPLE_RATE)
-        clip = clip.with_start(0.0) if hasattr(clip, "with_start") else clip.set_start(0.0)
-        audio_clips.append(clip)
-        
-    final_audio = CompositeAudioClip(audio_clips)
+        # Max samples we can write: either until the end of the window or the buffer
+        window_end_sample = int(target_end * SAMPLE_RATE)
+        max_samples = min(raw_samples, window_end_sample - start_sample, total_samples - start_sample)
+
+        if max_samples <= 0:
+            logger.warning(f"  → Segment {i} is out of range; skipping")
+            continue
+
+        # Paste audio into the silent timeline
+        timeline[start_sample : start_sample + max_samples] = raw_stereo[:max_samples]
+        prev_end_sample = start_sample + max_samples
+        logger.info(f"  → placed at {start_sample/SAMPLE_RATE:.2f}s – {prev_end_sample/SAMPLE_RATE:.2f}s")
+
+    # ── 3. Write the finished timeline to disk ────────────────────────────────
     out_path = os.path.join(tmp_dir, "hindi_dubbed.wav")
-    final_audio.write_audiofile(out_path, fps=SAMPLE_RATE, logger=None)
-    
-    logger.info(f"Hindi dubbed composite audio → {out_path}")
+    sf.write(out_path, timeline, SAMPLE_RATE)
+    logger.info(f"Hindi dubbed audio → {out_path} ({total_duration:.1f}s)")
     return out_path
 
 
