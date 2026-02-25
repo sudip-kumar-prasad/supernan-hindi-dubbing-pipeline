@@ -99,15 +99,21 @@ def _stretch_audio(audio: np.ndarray, sr: int, ratio: float) -> np.ndarray:
     import soundfile as sf
 
     filters = []
-    r = ratio
+    
+    # ratio = target_duration / raw_duration
+    # If target is larger (ratio > 1), we want to SLOW DOWN the audio.
+    # ffmpeg atempo > 1 speeds up. So atempo must be 1 / ratio.
+    tempo = 1.0 / ratio
+
     # ffmpeg atempo only accepts values in [0.5, 2.0]
-    while r > 2.0:
+    while tempo > 2.0:
         filters.append("atempo=2.0")
-        r /= 2.0
-    while r < 0.5:
+        tempo /= 2.0
+    while tempo < 0.5:
         filters.append("atempo=0.5")
-        r /= 0.5
-    filters.append(f"atempo={r:.6f}")
+        tempo /= 0.5
+        
+    filters.append(f"atempo={tempo:.6f}")
     af_str = ",".join(filters)
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f_in, \
@@ -267,9 +273,15 @@ def synthesise(
         
         # 3. Time stretch if needed to roughly fit the target duration
         if raw_duration > 0 and target_duration > 0:
-            ratio = raw_duration / target_duration
+            target_padding = 0.2 if i < len(segments)-1 else 0.0
+            
+            # The exact window we want this speech to fill
+            desired_duration = target_duration - target_padding
+            
+            ratio = desired_duration / raw_duration
             if ratio < 0.85 or ratio > 1.15:
-                logger.info(f"  → Applying atempo ({ratio:.2f}x) to precisely fit segment window")
+                # Need to stretch or compress
+                logger.info(f"  → Applying atempo to precisely fit segment window (target = {desired_duration:.2f}s)")
                 raw_audio_stereo = _stretch_audio(raw_audio_stereo, SAMPLE_RATE, ratio)
                 raw_duration = len(raw_audio_stereo) / SAMPLE_RATE
                 
